@@ -1,13 +1,9 @@
 import java.io.*;
 import java.util.*;
 
-/**
- * 0/1 knapsack: maximize sum of values with sum of weights &lt;= capacity.
- * Input: first line "n W", then n lines "value weight" (weight sum at most W).
- */
+
 public class BagSolver {
 
-    /** Above this (n * capacity) we skip exact DP and use a simple greedy baseline. */
     private static final long MAX_DP_CELLS = 50_000_000L;
 
     public static void main(String[] args) throws Exception {
@@ -57,10 +53,9 @@ public class BagSolver {
         if (n > 0 && cells <= MAX_DP_CELLS) {
             return solveDp01(values, weights, n, capacity);
         }
-        return solveGreedyByDensity(values, weights, n, capacity);
+        return solveGreedyWithLocalSearch(values, weights, n, capacity);
     }
 
-    /** Exact 0/1 knapsack via one-dimensional DP, O(n * W). */
     private static long solveDp01(int[] v, int[] w, int n, int W) {
         int[] dp = new int[W + 1];
         for (int i = 0; i < n; i++) {
@@ -76,11 +71,9 @@ public class BagSolver {
         return dp[W];
     }
 
-    /**
-     * Primitive baseline: sort by value/weight descending, take items while they fit.
-     * Fast; not optimal in general — intended as a hook for heuristics / local search.
-     */
-    private static long solveGreedyByDensity(int[] v, int[] w, int n, int W) {
+
+    private static long solveGreedyWithLocalSearch(int[] v, int[] w, int n, int W) {
+        boolean[] take = new boolean[n];
         Integer[] order = new Integer[n];
         for (int i = 0; i < n; i++) {
             order[i] = i;
@@ -90,15 +83,74 @@ public class BagSolver {
             long rhs = (long) v[b] * w[a];
             return Long.compare(rhs, lhs);
         });
-        long totalValue = 0;
-        int used = 0;
+        int curW = 0;
         for (int k = 0; k < n; k++) {
             int i = order[k];
-            if (w[i] <= W - used) {
-                used += w[i];
-                totalValue += v[i];
+            if (w[i] <= W - curW) {
+                take[i] = true;
+                curW += w[i];
             }
         }
-        return totalValue;
+        return localSearchHillClimb(v, w, n, W, take);
+    }
+
+    private static long localSearchHillClimb(int[] v, int[] w, int n, int W, boolean[] take) {
+        int curW = 0;
+        long curV = 0;
+        for (int i = 0; i < n; i++) {
+            if (take[i]) {
+                curW += w[i];
+                curV += v[i];
+            }
+        }
+        while (true) {
+            int bestJ = -1;
+            int bestAddVal = -1;
+            for (int j = 0; j < n; j++) {
+                if (!take[j] && curW + w[j] <= W) {
+                    if (v[j] > bestAddVal) {
+                        bestAddVal = v[j];
+                        bestJ = j;
+                    }
+                }
+            }
+            int bestI = -1;
+            int bestJswap = -1;
+            int bestDelta = 0;
+            for (int i = 0; i < n; i++) {
+                if (!take[i]) {
+                    continue;
+                }
+                for (int j = 0; j < n; j++) {
+                    if (take[j]) {
+                        continue;
+                    }
+                    if (curW - w[i] + w[j] <= W) {
+                        int d = v[j] - v[i];
+                        if (d > bestDelta) {
+                            bestDelta = d;
+                            bestI = i;
+                            bestJswap = j;
+                        }
+                    }
+                }
+            }
+            boolean canAdd = bestJ >= 0 && bestAddVal > 0;
+            boolean canSwap = bestDelta > 0;
+            if (!canAdd && !canSwap) {
+                break;
+            }
+            if (canAdd && (!canSwap || bestAddVal >= bestDelta)) {
+                take[bestJ] = true;
+                curW += w[bestJ];
+                curV += bestAddVal;
+            } else {
+                take[bestI] = false;
+                take[bestJswap] = true;
+                curW += w[bestJswap] - w[bestI];
+                curV += bestDelta;
+            }
+        }
+        return curV;
     }
 }
