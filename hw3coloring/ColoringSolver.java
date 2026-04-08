@@ -60,7 +60,9 @@ public class ColoringSolver {
         if (n <= EXACT_N_LIMIT) {
             return solveExactBySubsetDp(adj);
         }
-        return solveDsatur(adj);
+        int[] color = dsaturColoring(adj);
+        localSearchImprove(adj, color);
+        return countUsedColors(color);
     }
 
     private static int[] readAllInts(BufferedReader br) throws IOException {
@@ -130,7 +132,7 @@ public class ColoringSolver {
         return dp[fullMask];
     }
 
-    private static int solveDsatur(int[][] adj) {
+    private static int[] dsaturColoring(int[][] adj) {
         int n = adj.length;
         int[] degree = new int[n];
         for (int i = 0; i < n; i++) {
@@ -190,6 +192,260 @@ public class ColoringSolver {
             }
         }
 
-        return maxColor + 1;
+        return color;
+    }
+
+    private static int countUsedColors(int[] color) {
+        int max = -1;
+        for (int c : color) {
+            if (c > max) {
+                max = c;
+            }
+        }
+        return max + 1;
+    }
+
+    private static void compressColors(int[] color) {
+        int max = -1;
+        for (int c : color) {
+            if (c > max) {
+                max = c;
+            }
+        }
+        if (max < 0) {
+            return;
+        }
+        boolean[] seen = new boolean[max + 1];
+        for (int c : color) {
+            seen[c] = true;
+        }
+        int[] map = new int[max + 1];
+        int t = 0;
+        for (int c = 0; c <= max; c++) {
+            if (seen[c]) {
+                map[c] = t++;
+            }
+        }
+        for (int i = 0; i < color.length; i++) {
+            color[i] = map[color[i]];
+        }
+    }
+
+    private static void localSearchImprove(int[][] adj, int[] color) {
+        int n = color.length;
+        Random rnd = new Random(0xC011_7E5L);
+        int[] order = new int[n];
+        for (int i = 0; i < n; i++) {
+            order[i] = i;
+        }
+
+        int[] neighborHasColor = new int[n + 1];
+        int[] stampRef = new int[]{1};
+
+        int best = countUsedColors(color);
+        int idle = 0;
+        final int maxIdleRounds = 12;
+        final int maxRounds = 200;
+
+        int kempeMoves = Math.max(30, n / 3);
+        kempeMoves = Math.min(kempeMoves, 800);
+
+        for (int round = 0; round < maxRounds && idle < maxIdleRounds; round++) {
+            shuffle(order, rnd);
+            greedyMinimalColorSweep(adj, color, order, neighborHasColor, stampRef);
+            compressColors(color);
+
+            kempeRandomPerturbations(adj, color, rnd, kempeMoves);
+            compressColors(color);
+
+            tryLowerMaxColorVertices(adj, color, rnd, neighborHasColor, stampRef);
+
+            shuffle(order, rnd);
+            greedyMinimalColorSweep(adj, color, order, neighborHasColor, stampRef);
+            compressColors(color);
+
+            tryShiftNonMaxToSmaller(adj, color, rnd, neighborHasColor, stampRef);
+            compressColors(color);
+
+            int now = countUsedColors(color);
+            if (now < best) {
+                best = now;
+                idle = 0;
+            } else {
+                idle++;
+            }
+        }
+    }
+
+    private static void greedyMinimalColorSweep(int[][] adj, int[] color, int[] order,
+            int[] blocked, int[] stampRef) {
+        int n = color.length;
+        int lim = n;
+        int stamp = stampRef[0];
+        for (int u : order) {
+            stamp++;
+            for (int v : adj[u]) {
+                int cv = color[v];
+                if (cv >= 0 && cv < lim) {
+                    blocked[cv] = stamp;
+                }
+            }
+            int c = 0;
+            while (c < lim && blocked[c] == stamp) {
+                c++;
+            }
+            color[u] = c;
+        }
+        stampRef[0] = stamp;
+    }
+
+    private static void kempeSwapComponentContaining(int[][] adj, int[] color, int v, int i, int j) {
+        if (i == j) {
+            return;
+        }
+        int n = color.length;
+        if (color[v] != i) {
+            return;
+        }
+        boolean[] inComp = new boolean[n];
+        ArrayDeque<Integer> dq = new ArrayDeque<>();
+        inComp[v] = true;
+        dq.add(v);
+        while (!dq.isEmpty()) {
+            int u = dq.poll();
+            for (int w : adj[u]) {
+                int cw = color[w];
+                if ((cw == i || cw == j) && !inComp[w]) {
+                    inComp[w] = true;
+                    dq.add(w);
+                }
+            }
+        }
+        for (int u = 0; u < n; u++) {
+            if (!inComp[u]) {
+                continue;
+            }
+            if (color[u] == i) {
+                color[u] = j;
+            } else if (color[u] == j) {
+                color[u] = i;
+            }
+        }
+    }
+
+    private static void kempeRandomPerturbations(int[][] adj, int[] color, Random rnd, int numMoves) {
+        int n = color.length;
+        for (int t = 0; t < numMoves; t++) {
+            int k = countUsedColors(color);
+            if (k < 2) {
+                return;
+            }
+            int v = rnd.nextInt(n);
+            int i = color[v];
+            int j = rnd.nextInt(k);
+            while (j == i) {
+                j = rnd.nextInt(k);
+            }
+            kempeSwapComponentContaining(adj, color, v, i, j);
+        }
+    }
+
+    private static void tryLowerMaxColorVertices(int[][] adj, int[] color, Random rnd,
+            int[] blocked, int[] stampRef) {
+        int n = color.length;
+        ArrayList<Integer> high = new ArrayList<>();
+        for (int rep = 0; rep < 8; rep++) {
+            int maxC = -1;
+            for (int c : color) {
+                if (c > maxC) {
+                    maxC = c;
+                }
+            }
+            if (maxC <= 0) {
+                return;
+            }
+            high.clear();
+            for (int u = 0; u < n; u++) {
+                if (color[u] == maxC) {
+                    high.add(u);
+                }
+            }
+            if (high.isEmpty()) {
+                return;
+            }
+            Collections.shuffle(high, rnd);
+            int stamp = stampRef[0];
+            boolean moved = false;
+            for (int u : high) {
+                stamp++;
+                for (int v : adj[u]) {
+                    int cv = color[v];
+                    if (cv >= 0 && cv < maxC) {
+                        blocked[cv] = stamp;
+                    }
+                }
+                int c = 0;
+                while (c < maxC && blocked[c] == stamp) {
+                    c++;
+                }
+                if (c < maxC) {
+                    color[u] = c;
+                    moved = true;
+                }
+            }
+            stampRef[0] = stamp;
+            compressColors(color);
+            if (!moved) {
+                break;
+            }
+        }
+    }
+
+    private static void tryShiftNonMaxToSmaller(int[][] adj, int[] color, Random rnd,
+            int[] blocked, int[] stampRef) {
+        int n = color.length;
+        int maxC = -1;
+        for (int c : color) {
+            if (c > maxC) {
+                maxC = c;
+            }
+        }
+        if (maxC <= 0) {
+            return;
+        }
+        int stamp = stampRef[0];
+        ArrayList<Integer> verts = new ArrayList<>();
+        for (int u = 0; u < n; u++) {
+            if (color[u] < maxC) {
+                verts.add(u);
+            }
+        }
+        Collections.shuffle(verts, rnd);
+        for (int u : verts) {
+            stamp++;
+            for (int v : adj[u]) {
+                int cv = color[v];
+                if (cv >= 0 && cv < maxC) {
+                    blocked[cv] = stamp;
+                }
+            }
+            int c = 0;
+            while (c < maxC && blocked[c] == stamp) {
+                c++;
+            }
+            if (c < maxC) {
+                color[u] = c;
+            }
+        }
+        stampRef[0] = stamp;
+    }
+
+    private static void shuffle(int[] a, Random rnd) {
+        for (int i = a.length - 1; i > 0; i--) {
+            int j = rnd.nextInt(i + 1);
+            int t = a[i];
+            a[i] = a[j];
+            a[j] = t;
+        }
     }
 }
