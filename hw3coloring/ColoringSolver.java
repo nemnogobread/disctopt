@@ -4,6 +4,7 @@ import java.util.*;
 public class ColoringSolver {
 
     private static final int EXACT_N_LIMIT = 70;
+    private static final long HEURISTIC_TIME_NS = 10L * 60L * 1_000_000_000L;
 
     public static void main(String[] args) throws Exception {
         BufferedReader br;
@@ -61,7 +62,8 @@ public class ColoringSolver {
             return solveExactBySubsetDp(adj);
         }
         int[] color = dsaturColoring(adj);
-        localSearchImprove(adj, color);
+        long deadline = System.nanoTime() + HEURISTIC_TIME_NS;
+        localSearchImprove(adj, color, deadline);
         return countUsedColors(color);
     }
 
@@ -231,7 +233,7 @@ public class ColoringSolver {
         }
     }
 
-    private static void localSearchImprove(int[][] adj, int[] color) {
+    private static void localSearchImprove(int[][] adj, int[] color, long deadlineNs) {
         int n = color.length;
         Random rnd = new Random(0xC011_7E5L);
         int[] order = new int[n];
@@ -244,18 +246,16 @@ public class ColoringSolver {
 
         int best = countUsedColors(color);
         int idle = 0;
-        final int maxIdleRounds = 12;
-        final int maxRounds = 200;
+        final int maxIdleBeforeKick = 28;
+        int kempePerRound = Math.min(8000, Math.max(80, n + n / 2));
+        int kempeKick = Math.min(12000, Math.max(200, n * 2));
 
-        int kempeMoves = Math.max(30, n / 3);
-        kempeMoves = Math.min(kempeMoves, 800);
-
-        for (int round = 0; round < maxRounds && idle < maxIdleRounds; round++) {
+        while (System.nanoTime() < deadlineNs) {
             shuffle(order, rnd);
             greedyMinimalColorSweep(adj, color, order, neighborHasColor, stampRef);
             compressColors(color);
 
-            kempeRandomPerturbations(adj, color, rnd, kempeMoves);
+            kempeRandomPerturbations(adj, color, rnd, kempePerRound);
             compressColors(color);
 
             tryLowerMaxColorVertices(adj, color, rnd, neighborHasColor, stampRef);
@@ -273,6 +273,12 @@ public class ColoringSolver {
                 idle = 0;
             } else {
                 idle++;
+            }
+
+            if (idle >= maxIdleBeforeKick) {
+                kempeRandomPerturbations(adj, color, rnd, kempeKick);
+                compressColors(color);
+                idle = 0;
             }
         }
     }
@@ -354,7 +360,8 @@ public class ColoringSolver {
             int[] blocked, int[] stampRef) {
         int n = color.length;
         ArrayList<Integer> high = new ArrayList<>();
-        for (int rep = 0; rep < 8; rep++) {
+        ArrayList<Integer> feas = new ArrayList<>();
+        for (int rep = 0; rep < 20; rep++) {
             int maxC = -1;
             for (int c : color) {
                 if (c > maxC) {
@@ -384,12 +391,14 @@ public class ColoringSolver {
                         blocked[cv] = stamp;
                     }
                 }
-                int c = 0;
-                while (c < maxC && blocked[c] == stamp) {
-                    c++;
+                feas.clear();
+                for (int c = 0; c < maxC; c++) {
+                    if (blocked[c] != stamp) {
+                        feas.add(c);
+                    }
                 }
-                if (c < maxC) {
-                    color[u] = c;
+                if (!feas.isEmpty()) {
+                    color[u] = feas.get(rnd.nextInt(feas.size()));
                     moved = true;
                 }
             }
