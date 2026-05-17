@@ -4,14 +4,21 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Random;
 
-
+/**
+ * Multistart nearest neighbor, keep top-K tours, 2-opt + 3-opt on each candidate.
+ */
 public class TspSolver {
 
-    private static final int FULL_MULTISTART_N = 520;
-    private static final int THREE_OPT_EXHAUSTIVE_MAX_N = 1_400;
+    private static final int TOP_K = 5;
+    private static final int FULL_MULTISTART_N = 600;
+    /** Full 2-opt/3-opt only up to this n; larger instances use sampled local search. */
+    private static final int LOCAL_SEARCH_EXHAUSTIVE_MAX_N = 1_000;
+    private static final int TWO_OPT_MAX_EXHAUSTIVE_PASSES = 50_000;
     private static final int THREE_OPT_MAX_EXHAUSTIVE_PASSES = 50_000;
-    private static final int THREE_OPT_RANDOM_ROUNDS = 24;
-    private static final int THREE_OPT_SAMPLES_PER_ROUND = 600_000;
+    private static final int TWO_OPT_RANDOM_ROUNDS = 16;
+    private static final int TWO_OPT_SAMPLES_PER_ROUND = 800_000;
+    private static final int THREE_OPT_RANDOM_ROUNDS = 48;
+    private static final int THREE_OPT_SAMPLES_PER_ROUND = 1_200_000;
 
     public static long solveFromFile(String fileName) throws Exception {
         try (BufferedReader br = new BufferedReader(new FileReader(fileName))) {
@@ -42,20 +49,50 @@ public class TspSolver {
         }
 
         int numStarts = multistartCount(n);
-        int[] bestTour = null;
-        double bestLen = Double.POSITIVE_INFINITY;
+        double[] topLen = new double[TOP_K];
+        int[][] topTours = new int[TOP_K][];
+        int topCount = 0;
+
         for (int t = 0; t < numStarts; t++) {
             int start = startVertex(n, numStarts, t);
             int[] tour = nearestNeighborTour(x, y, n, start);
             double len = tourLength(tour, x, y, n);
+            topCount = insertTopTour(topTours, topLen, topCount, TOP_K, tour, len, n);
+        }
+
+        int[] bestTour = Arrays.copyOf(topTours[0], n);
+        double bestLen = topLen[0];
+        for (int k = 0; k < topCount; k++) {
+            int[] tour = Arrays.copyOf(topTours[k], n);
+            localSearch(tour, x, y, n);
+            double len = tourLength(tour, x, y, n);
             if (len < bestLen) {
                 bestLen = len;
-                bestTour = Arrays.copyOf(tour, n);
+                bestTour = tour;
             }
         }
 
-        threeOpt(bestTour, x, y, n);
         return Math.round(tourLength(bestTour, x, y, n));
+    }
+
+    private static int insertTopTour(int[][] topTours, double[] topLen, int topCount, int k,
+            int[] tour, double len, int n) {
+        if (topCount < k) {
+            topTours[topCount] = Arrays.copyOf(tour, n);
+            topLen[topCount] = len;
+            return topCount + 1;
+        }
+        int worst = 0;
+        for (int i = 1; i < k; i++) {
+            if (topLen[i] > topLen[worst]) {
+                worst = i;
+            }
+        }
+        if (len < topLen[worst]) {
+            topTours[worst] = Arrays.copyOf(tour, n);
+            topLen[worst] = len;
+        }
+        return k;
     }
 
     private static int multistartCount(int n) {
@@ -63,12 +100,12 @@ public class TspSolver {
             return n;
         }
         if (n <= 2000) {
-            return Math.min(n, 72);
+            return Math.min(n, 150);
         }
         if (n <= 12000) {
-            return Math.min(n, 24);
+            return Math.min(n, 32);
         }
-        return Math.min(n, 6);
+        return Math.min(n, 8);
     }
 
     private static int startVertex(int n, int numStarts, int idx) {
@@ -87,7 +124,7 @@ public class TspSolver {
         tour[0] = start;
         used[start] = true;
         int cur = start;
-        for (int k = 1; k < n; k++) {
+        for (int step = 1; step < n; step++) {
             int next = -1;
             double bestD = Double.POSITIVE_INFINITY;
             for (int j = 0; j < n; j++) {
@@ -100,11 +137,20 @@ public class TspSolver {
                     next = j;
                 }
             }
-            tour[k] = next;
+            tour[step] = next;
             used[next] = true;
             cur = next;
         }
         return tour;
+    }
+
+    private static void localSearch(int[] tour, double[] x, double[] y, int n) {
+        if (n < 4) {
+            return;
+        }
+        twoOpt(tour, x, y, n);
+        threeOpt(tour, x, y, n);
+        twoOpt(tour, x, y, n);
     }
 
     private static double tourLength(int[] tour, double[] x, double[] y, int n) {
@@ -115,11 +161,120 @@ public class TspSolver {
         return s;
     }
 
+    private static double minGainThreshold(double lenTour) {
+        return Math.max(1e-9, 1e-12 * lenTour);
+    }
+
+    private static void twoOpt(int[] tour, double[] x, double[] y, int n) {
+        if (n < 4) {
+            return;
+        }
+        if (n <= LOCAL_SEARCH_EXHAUSTIVE_MAX_N) {
+            for (int pass = 0; pass < TWO_OPT_MAX_EXHAUSTIVE_PASSES; pass++) {
+                if (!twoOptExhaustiveRound(tour, x, y, n)) {
+                    break;
+                }
+            }
+        } else {
+            Random rnd = new Random(131313L);
+            for (int r = 0; r < TWO_OPT_RANDOM_ROUNDS; r++) {
+                if (!twoOptRandomRound(tour, x, y, n, rnd, TWO_OPT_SAMPLES_PER_ROUND)) {
+                    break;
+                }
+            }
+        }
+    }
+
+    private static boolean twoOptExhaustiveRound(int[] tour, double[] x, double[] y, int n) {
+        double lenTour = tourLength(tour, x, y, n);
+        double minGain = minGainThreshold(lenTour);
+
+        int[] dup = new int[2 * n];
+        System.arraycopy(tour, 0, dup, 0, n);
+        System.arraycopy(tour, 0, dup, n, n);
+
+        double bestDelta = 0.0;
+        int bestI = -1;
+        int bestJ = -1;
+
+        for (int i = 0; i < n; i++) {
+            int a = dup[i];
+            int b = dup[i + 1];
+            for (int j = i + 2; j <= i + n - 2; j++) {
+                int c = dup[j];
+                int d = dup[j + 1];
+                double delta = dist(x, y, a, c) + dist(x, y, b, d) - dist(x, y, a, b) - dist(x, y, c, d);
+                if (delta < -minGain && delta < bestDelta - 1e-15) {
+                    bestDelta = delta;
+                    bestI = i;
+                    bestJ = j;
+                }
+            }
+        }
+
+        if (bestI < 0 || bestDelta >= -minGain) {
+            return false;
+        }
+
+        double beforeLen = lenTour;
+        int[] backup = Arrays.copyOf(tour, n);
+        applyTwoOpt(tour, n, bestI, bestJ);
+        if (tourLength(tour, x, y, n) >= beforeLen - minGain) {
+            System.arraycopy(backup, 0, tour, 0, n);
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean twoOptRandomRound(int[] tour, double[] x, double[] y, int n, Random rnd, int samples) {
+        double lenTour0 = tourLength(tour, x, y, n);
+        double minGain0 = minGainThreshold(lenTour0);
+
+        int[] dup = new int[2 * n];
+        for (int s = 0; s < samples; s++) {
+            System.arraycopy(tour, 0, dup, 0, n);
+            System.arraycopy(tour, 0, dup, n, n);
+            int i = rnd.nextInt(n);
+            int j = i + 2 + rnd.nextInt(Math.max(1, n - 4));
+            if (j > i + n - 2) {
+                continue;
+            }
+
+            int a = dup[i];
+            int b = dup[i + 1];
+            int c = dup[j];
+            int d = dup[j + 1];
+            double delta = dist(x, y, a, c) + dist(x, y, b, d) - dist(x, y, a, b) - dist(x, y, c, d);
+            if (delta >= -minGain0) {
+                continue;
+            }
+
+            int[] backup = Arrays.copyOf(tour, n);
+            applyTwoOpt(tour, n, i, j);
+            if (tourLength(tour, x, y, n) < lenTour0 - minGain0) {
+                return true;
+            }
+            System.arraycopy(backup, 0, tour, 0, n);
+        }
+        return false;
+    }
+
+    private static void applyTwoOpt(int[] tour, int n, int i, int j) {
+        int[] work = new int[n];
+        for (int p = 0; p < n; p++) {
+            work[p] = tour[(i + p) % n];
+        }
+        reverse(work, 1, j - i);
+        for (int p = 0; p < n; p++) {
+            tour[(i + p) % n] = work[p];
+        }
+    }
+
     private static void threeOpt(int[] tour, double[] x, double[] y, int n) {
         if (n < 6) {
             return;
         }
-        if (n <= THREE_OPT_EXHAUSTIVE_MAX_N) {
+        if (n <= LOCAL_SEARCH_EXHAUSTIVE_MAX_N) {
             for (int pass = 0; pass < THREE_OPT_MAX_EXHAUSTIVE_PASSES; pass++) {
                 if (!threeOptExhaustiveRound(tour, x, y, n)) {
                     break;
@@ -137,7 +292,7 @@ public class TspSolver {
 
     private static boolean threeOptExhaustiveRound(int[] tour, double[] x, double[] y, int n) {
         double lenTour = tourLength(tour, x, y, n);
-        double minGain = Math.max(1e-9, 1e-12 * lenTour);
+        double minGain = minGainThreshold(lenTour);
 
         int[] dup = new int[2 * n];
         System.arraycopy(tour, 0, dup, 0, n);
@@ -221,8 +376,7 @@ public class TspSolver {
         double beforeLen = lenTour;
         int[] backup = Arrays.copyOf(tour, n);
         applyThreeOptCase(tour, n, bestI, bestJ, bestK, bestCase);
-        double afterLen = tourLength(tour, x, y, n);
-        if (afterLen >= beforeLen - minGain) {
+        if (tourLength(tour, x, y, n) >= beforeLen - minGain) {
             System.arraycopy(backup, 0, tour, 0, n);
             return false;
         }
@@ -231,7 +385,7 @@ public class TspSolver {
 
     private static boolean threeOptRandomRound(int[] tour, double[] x, double[] y, int n, Random rnd, int samples) {
         double lenTour0 = tourLength(tour, x, y, n);
-        double minGain0 = Math.max(1e-9, 1e-12 * lenTour0);
+        double minGain0 = minGainThreshold(lenTour0);
 
         int[] dup = new int[2 * n];
         for (int s = 0; s < samples; s++) {
@@ -292,8 +446,7 @@ public class TspSolver {
                 double beforeLen = lenTour0;
                 int[] backup = Arrays.copyOf(tour, n);
                 applyThreeOptCase(tour, n, i, j, k, bestCase);
-                double afterLen = tourLength(tour, x, y, n);
-                if (afterLen < beforeLen - minGain0) {
+                if (tourLength(tour, x, y, n) < beforeLen - minGain0) {
                     return true;
                 }
                 System.arraycopy(backup, 0, tour, 0, n);
